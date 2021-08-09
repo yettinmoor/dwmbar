@@ -5,6 +5,9 @@ A very minimal, ~200 SLOC program to set dwm's statusbar through xsetroot. Modul
 Customize by changing `$XDG_CONFIG_HOME/dwmbar.cfg`. An example config:
 
 ```cfg
+[!global]
+delim = " | "
+
 [mpc]
 cmd = "mpc current -f '%artist% - %title%'"
 prefix = "♫"

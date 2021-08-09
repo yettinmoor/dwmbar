@@ -61,7 +61,7 @@ pub fn main() anyerror!void {
         for (blocks) |b, i| {
             const line = it.next().?;
             if (i == block_index) {
-                const output = param orelse try runCmd(allocator, blocks[i].cmd);
+                const output = param orelse try runCmd(allocator, b.cmd);
                 try outputs.append(output);
             } else {
                 try outputs.append(line);
@@ -88,16 +88,18 @@ pub fn main() anyerror!void {
         try block_file.writer().print("{s}\n", .{o});
     }
 
-    bar.items.len -= config.delim.len;
+    bar.resize(bar.items.len - config.delim.len) catch unreachable;
     try bar.appendSlice(" \x00");
-
     try block_file.setEndPos(try block_file.getPos());
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }
 
 fn runCmd(allocator: *mem.Allocator, cmd: []const u8) ![]const u8 {
-    const exec = try std.ChildProcess.exec(.{ .allocator = allocator, .argv = &[3][]const u8{ "sh", "-c", cmd } });
+    const exec = try std.ChildProcess.exec(.{
+        .allocator = allocator,
+        .argv = &[3][]const u8{ "sh", "-c", cmd },
+    });
     allocator.free(exec.stderr);
     for (exec.stdout) |*c| {
         if (c.* == '\n') c.* = ' ';
