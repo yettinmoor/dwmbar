@@ -13,12 +13,25 @@ pub const delim = " | ";
 const known_folders = @import("known-folders/known-folders.zig");
 
 pub fn readConfig(allocator: *mem.Allocator) ![]Block {
-    const config_dir = try known_folders.open(allocator, .local_configuration, .{});
-    const config_txt = try config_dir.?.readFileAlloc(allocator, "dwmbar.cfg", std.math.maxInt(u32));
+    const config = blk: {
+        const dir = (try known_folders.open(allocator, .local_configuration, .{})) orelse {
+            log.err("config file not found; create `dwmbar.cfg` in your config dir.", .{});
+            return error.ParseError;
+        };
+        const file = try dir.openFile("dwmbar.cfg", .{});
+        defer file.close();
+
+        var config = std.ArrayList(u8).init(allocator);
+        try file.reader().readAllArrayList(&config, std.math.maxInt(u16));
+        try config.appendSlice("\n[dummy]");
+
+        break :blk config.toOwnedSlice();
+    };
 
     var blocks = std.ArrayList(Block).init(allocator);
+    var names = std.StringHashMap(void).init(allocator);
 
-    var it = mem.split(config_txt, "\n");
+    var it = mem.split(config, "\n");
 
     var name: ?[]const u8 = null;
     var cmd: ?[]const u8 = null;
@@ -35,7 +48,12 @@ pub fn readConfig(allocator: *mem.Allocator) ![]Block {
             '[' => {
                 if (name) |given_name| {
                     if (cmd) |given_cmd| {
+                        if (names.contains(given_name)) {
+                            log.err("line {}: duplicate block: `{s}`", .{ line_no, given_name });
+                            return error.ParseError;
+                        }
                         try blocks.append(.{ .name = given_name, .cmd = given_cmd, .prefix = prefix });
+                        try names.put(given_name, {});
                         cmd = null;
                         prefix = null;
                     } else {
@@ -43,38 +61,46 @@ pub fn readConfig(allocator: *mem.Allocator) ![]Block {
                         return error.ParseError;
                     }
                 }
+
                 const end = mem.lastIndexOfScalar(u8, line, ']') orelse {
                     log.err("line {}: invalid header fmt: `{s}`", .{ line_no, line });
                     return error.ParseError;
                 };
                 name = mem.trim(u8, line[1..end], " \t");
+                if (name.?.len == 0) {
+                    log.err("line {}: empty name", .{line_no});
+                    return error.ParseError;
+                }
             },
             else => {
                 var line_it = mem.tokenize(line, " ");
+
                 const key = line_it.next().?;
+
                 const equals = line_it.next() orelse "";
                 if (!mem.eql(u8, equals, "=")) {
                     log.err("line {}: expected `=`", .{line_no});
                     return error.ParseError;
                 }
-                const value = mem.trim(u8, line_it.rest(), "\"");
+
+                const value = blk: {
+                    const value = line_it.rest();
+                    if (value.len == 0) {
+                        log.err("line {}: expected value", .{line_no});
+                        return error.ParseError;
+                    }
+                    break :blk mem.trim(u8, value, "\"");
+                };
+
                 if (mem.eql(u8, key, "cmd")) {
                     cmd = value;
                 } else if (mem.eql(u8, key, "prefix")) {
                     prefix = value;
                 } else {
                     log.err("line {}: invalid key: `{s}`", .{ line_no, key });
+                    return error.ParseError;
                 }
             },
-        }
-    }
-
-    if (name) |given_name| {
-        if (cmd) |given_cmd| {
-            try blocks.append(.{ .name = given_name, .cmd = given_cmd, .prefix = prefix });
-        } else {
-            log.err("block `{s}` has no command!", .{given_name});
-            return error.ParseError;
         }
     }
 
