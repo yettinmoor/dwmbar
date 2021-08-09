@@ -17,6 +17,11 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("dwmbar", "src/main.zig");
 
+    exe.addPackage(.{
+        .name = "known-folders",
+        .path = "src/known-folders/known-folders.zig",
+    });
+
     exe.addCSourceFile("src/display.c", &[_][]const u8{});
     exe.setTarget(target);
     exe.setBuildMode(mode);
@@ -32,11 +37,6 @@ pub fn build(b: *std.build.Builder) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-}
-
-fn install(step: *std.build.Step) !void {
-    std.debug.print("hello!\n", .{});
-    try std.fs.copyFileAbsolute("zig-out/bin/dwmbar", "/usr/local/bin", .{});
 }
 
 fn makeTimestampFile() !void {

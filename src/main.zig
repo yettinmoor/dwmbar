@@ -4,7 +4,7 @@ const mem = std.mem;
 extern fn display(*const u8) void;
 
 const config = @import("config.zig");
-const path = "/tmp/dwmbar";
+const block_file_path = "/tmp/dwmbar";
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -12,25 +12,33 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     const allocator = &arena.allocator;
 
+    const blocks = config.readConfig(allocator) catch {
+        std.log.err("parsing error, exiting...", .{});
+        std.process.exit(1);
+    };
+
     var args = std.process.ArgIteratorPosix.init();
     _ = args.next();
     const cmd = args.next();
     const param = args.next();
 
     const cwd = std.fs.cwd();
-    const file = try cwd.createFile(path, .{ .read = true, .truncate = false });
-    defer file.close();
+    const block_file = try cwd.createFile(
+        block_file_path,
+        .{ .read = true, .truncate = false },
+    );
+    defer block_file.close();
 
     const always_run_all = blk: {
-        const stat = try file.stat();
+        const stat = try block_file.stat();
         break :blk stat.size == 0 or stat.mtime < compile_timestamp;
     };
 
     var outputs = std.ArrayList([]const u8).init(allocator);
 
-    // `dwmbar` OR file newly created OR file is older than compiled program
+    // `dwmbar` OR block_file newly created OR block_file is older than compiled program
     if (cmd == null or always_run_all) {
-        for (config.blocks) |b| {
+        for (blocks) |b| {
             const output = try runCmd(allocator, b.cmd);
             try outputs.append(output);
         }
@@ -38,7 +46,7 @@ pub fn main() anyerror!void {
 
     // `dwmbar <cmd>`
     else {
-        const block_index = for (config.blocks) |b, i| {
+        const block_index = for (blocks) |b, i| {
             if (std.mem.eql(u8, cmd.?, b.name)) {
                 break i;
             }
@@ -47,13 +55,13 @@ pub fn main() anyerror!void {
             std.process.exit(1);
         };
 
-        const contents = try file.readToEndAlloc(allocator, 2048);
+        const contents = try block_file.readToEndAlloc(allocator, 2048);
         var it = mem.split(contents, "\n");
 
-        for (config.blocks) |b, i| {
+        for (blocks) |b, i| {
             const line = it.next().?;
             if (i == block_index) {
-                const output = param orelse try runCmd(allocator, config.blocks[i].cmd);
+                const output = param orelse try runCmd(allocator, blocks[i].cmd);
                 try outputs.append(output);
             } else {
                 try outputs.append(line);
@@ -61,7 +69,7 @@ pub fn main() anyerror!void {
         }
     }
 
-    try file.seekTo(0);
+    try block_file.seekTo(0);
 
     var bar = std.ArrayList(u8).init(allocator);
     try bar.appendSlice(" ");
@@ -69,7 +77,7 @@ pub fn main() anyerror!void {
     for (outputs.items) |o, i| {
         // output to dwmbar
         if (o.len != 0) {
-            if (config.blocks[i].prefix) |prefix| {
+            if (blocks[i].prefix) |prefix| {
                 try bar.writer().print("{s} ", .{prefix});
             }
             try bar.appendSlice(mem.trimRight(u8, o, " \t\r\n"));
@@ -77,13 +85,13 @@ pub fn main() anyerror!void {
         }
 
         // output to /tmp/dwmbar
-        try file.writer().print("{s}\n", .{o});
+        try block_file.writer().print("{s}\n", .{o});
     }
 
     bar.items.len -= config.delim.len;
     try bar.appendSlice(" \x00");
 
-    try file.setEndPos(try file.getPos());
+    try block_file.setEndPos(try block_file.getPos());
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }
