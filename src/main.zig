@@ -44,6 +44,19 @@ pub fn main() anyerror!void {
         }
     }
 
+    // help
+    else if (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help")) {
+        try std.io.getStdErr().writer().writeAll(
+            \\Usage: dwmbar [cmd] [param]
+            \\
+            \\   Run `dwmbar` to update all blocks.
+            \\   Run `dwmbar <cmd>` to update the block named <cmd>.
+            \\   Run `dwmbar <cmd> <param>` to set the block named <cmd> to <param>.
+            \\
+        );
+        std.process.exit(0);
+    }
+
     // `dwmbar <cmd>`
     else {
         const block_index = for (blocks) |b, i| {
