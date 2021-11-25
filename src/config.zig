@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const log = std.log;
+const StringArrayHashMap = std.StringArrayHashMap;
 
 pub const Block = struct {
     name: []const u8,
@@ -10,35 +11,67 @@ pub const Block = struct {
 
 pub var delim: []const u8 = " | ";
 
+pub var global_prefix: []const u8 = " ";
+pub var global_suffix: []const u8 = " ";
+
 const known_folders = @import("known-folders/known-folders.zig");
 
 /// Caller owns returned slice.
-pub fn readConfig(allocator: *mem.Allocator) ![]Block {
+pub fn readConfigFile(allocator: *mem.Allocator) ![]Block {
     const config = blk: {
-        const dir = (try known_folders.open(allocator, .local_configuration, .{})) orelse {
-            log.err("config file not found; create `dwmbar.cfg` in your config dir.", .{});
-            return error.ParseError;
-        };
-        const file = try dir.openFile("dwmbar.cfg", .{});
-        defer file.close();
-
-        var config = std.ArrayList(u8).init(allocator);
-        try file.reader().readAllArrayList(&config, std.math.maxInt(u16));
-        try config.appendSlice("\n[dummy]");
-
-        break :blk config.toOwnedSlice();
+        const dir =
+            (try known_folders.open(allocator, .local_configuration, .{})) orelse
+            return error.FileNotFound;
+        break :blk try dir.readFileAlloc(allocator, "dwmbar.cfg", std.math.maxInt(u32));
     };
-    // defer allocator.free(config);
+    defer allocator.free(config);
+    return readConfig(allocator, config);
+}
+
+fn readConfig(allocator: *mem.Allocator, config: []const u8) ![]Block {
+    var kv_blocks = try getKvBlocks(allocator, config);
+    defer kv_blocks.deinit();
 
     var blocks = std.ArrayList(Block).init(allocator);
-    var names = std.StringHashMap(void).init(allocator);
-    defer names.deinit();
 
+    var kv_it = kv_blocks.iterator();
+    while (kv_it.next()) |kvs| {
+        const name = kvs.key_ptr.*;
+        if (mem.eql(u8, name, "!global")) {
+            if (kvs.value_ptr.get("delim")) |cfg_delim| {
+                delim = try allocator.dupe(u8, cfg_delim);
+            }
+            if (kvs.value_ptr.get("prefix")) |cfg_prefix| {
+                global_prefix = try allocator.dupe(u8, cfg_prefix);
+            }
+            if (kvs.value_ptr.get("suffix")) |cfg_suffix| {
+                global_suffix = try allocator.dupe(u8, cfg_suffix);
+            }
+        } else {
+            const cmd = kvs.value_ptr.get("cmd") orelse {
+                log.err("[{s}]: missing `cmd` parameter.", .{name});
+                return error.MissingParam;
+            };
+            const prefix = kvs.value_ptr.get("prefix");
+            try blocks.append(.{
+                .name = try allocator.dupe(u8, name),
+                .cmd = try allocator.dupe(u8, cmd),
+                .prefix = if (prefix) |p| try allocator.dupe(u8, p) else null,
+            });
+        }
+        kvs.value_ptr.deinit();
+    }
+
+    return blocks.toOwnedSlice();
+}
+
+const KeyValuePairs = StringArrayHashMap([]const u8);
+
+fn getKvBlocks(allocator: *mem.Allocator, config: []const u8) !StringArrayHashMap(KeyValuePairs) {
     var it = mem.split(config, "\n");
 
-    var current_name: ?[]const u8 = null;
-    var cmd: ?[]const u8 = null;
-    var prefix: ?[]const u8 = null;
+    var kv_blocks = StringArrayHashMap(KeyValuePairs).init(allocator);
+    var current_block: []const u8 = "";
 
     var line_no: usize = 1;
     while (it.next()) |untrimmed_line| : (line_no += 1) {
@@ -49,76 +82,79 @@ pub fn readConfig(allocator: *mem.Allocator) ![]Block {
         switch (line[0]) {
             '#' => {},
             '[' => {
-                if (current_name) |name| blk: {
-                    if (mem.eql(u8, name, "!global")) {
-                        break :blk;
-                    }
-                    if (cmd) |given_cmd| {
-                        if (names.contains(name)) {
-                            log.err("line {}: duplicate block: `{s}`", .{ line_no, name });
-                            return error.ParseError;
-                        }
-                        try blocks.append(.{ .name = name, .cmd = given_cmd, .prefix = prefix });
-                        try names.put(name, {});
-                        cmd = null;
-                        prefix = null;
-                    } else {
-                        log.err("block `{s}` has no command!", .{name});
-                        return error.ParseError;
-                    }
-                }
-
                 const end = mem.lastIndexOfScalar(u8, line, ']') orelse {
                     log.err("line {}: invalid header fmt: `{s}`", .{ line_no, line });
                     return error.ParseError;
                 };
-                current_name = mem.trim(u8, line[1..end], " \t");
-                if (current_name.?.len == 0) {
+                current_block = line[1..end];
+                if (current_block.len == 0) {
                     log.err("line {}: empty name", .{line_no});
                     return error.ParseError;
                 }
+                if (kv_blocks.contains(current_block)) {
+                    log.err("line {}: duplicate block: `{s}`", .{ line_no, current_block });
+                    return error.ParseError;
+                }
+                try kv_blocks.put(current_block, KeyValuePairs.init(allocator));
             },
             else => {
-                const name = current_name orelse {
-                    log.err("line {}: field outside block", .{line_no});
-                    return error.ParseError;
-                };
-
-                var line_it = mem.tokenize(line, " ");
-
-                const key = line_it.next().?;
-
-                if (!mem.eql(u8, "=", line_it.next() orelse "")) {
-                    log.err("line {}: expected `=`", .{line_no});
+                var line_it = mem.tokenize(line, "=");
+                const key = mem.trim(u8, line_it.next().?, " \t");
+                const value = mem.trim(u8, line_it.rest(), " \t");
+                if (value.len == 0) {
+                    log.err("line {}: expected value", .{line_no});
                     return error.ParseError;
                 }
-
-                const value = blk: {
-                    const value = line_it.rest();
-                    if (value.len == 0) {
-                        log.err("line {}: expected value", .{line_no});
-                        return error.ParseError;
-                    }
-                    break :blk mem.trim(u8, value, "\"");
-                };
-
-                if (mem.eql(u8, key, "cmd")) {
-                    cmd = value;
-                } else if (mem.eql(u8, key, "prefix")) {
-                    prefix = value;
-                } else if (mem.eql(u8, key, "delim")) {
-                    if (!mem.eql(u8, name, "!global")) {
-                        log.err("`delim` field must be in [!global]", .{});
-                        return error.ParseError;
-                    }
-                    delim = value;
-                } else {
-                    log.err("line {}: invalid key: `{s}`", .{ line_no, key });
+                var kv_block_entry = kv_blocks.getPtr(current_block) orelse {
+                    log.err("line {}: key-value pair outside block", .{line_no});
                     return error.ParseError;
-                }
+                };
+                try kv_block_entry.put(key, mem.trim(u8, value, "\""));
             },
         }
     }
 
-    return blocks.toOwnedSlice();
+    return kv_blocks;
+}
+
+const testing = std.testing;
+
+test {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    _ = try readConfig(&arena.allocator,
+        \\[!global]
+        \\delim = " | "
+        \\
+        \\[mpc]
+        \\cmd = "mpc current -f '%artist% - %title%'"
+        \\prefix = "♫"
+        \\
+        \\[updates]
+        \\cmd = "pacman -Qu | wc -l | grep -v '^0'"
+        \\prefix = ""
+        \\
+        \\[time]
+        \\cmd = "date +%R"
+        \\
+    );
+
+    try testing.expectError(error.MissingParam, readConfig(&arena.allocator,
+        \\[hello]
+        \\prefix = "!"
+        \\
+    ));
+
+    try testing.expectError(error.ParseError, readConfig(&arena.allocator,
+        \\[hello
+        \\cmd = "printf hello!"
+        \\
+    ));
+
+    try testing.expectError(error.ParseError, readConfig(&arena.allocator,
+        \\[hello]
+        \\cmd =
+        \\
+    ));
+
+    arena.deinit();
 }

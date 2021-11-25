@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const log = std.log;
 
 extern fn display(*const u8) void;
 
@@ -12,7 +13,9 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     const allocator = &arena.allocator;
 
-    const blocks = config.readConfig(allocator) catch {
+    const stderr = std.io.getStdErr().writer();
+
+    const blocks = config.readConfigFile(allocator) catch {
         std.log.err("parsing error, exiting...", .{});
         std.process.exit(1);
     };
@@ -29,24 +32,26 @@ pub fn main() anyerror!void {
     );
     defer block_file.close();
 
-    const always_run_all = blk: {
+    const run_all = blk: {
         const stat = try block_file.stat();
-        break :blk stat.size == 0 or stat.mtime < compile_timestamp;
+        break :blk stat.size == 0;
     };
 
     var outputs = std.ArrayList([]const u8).init(allocator);
 
-    // `dwmbar` OR block_file newly created OR block_file is older than compiled program
-    if (cmd == null or always_run_all) {
+    // `dwmbar` OR block_file newly created
+    if (cmd == null or run_all) {
         for (blocks) |b| {
             const output = try runCmd(allocator, b.cmd);
+            log.debug("running block [{s}]", .{b.name});
+            log.debug("  output: `{s}`", .{output});
             try outputs.append(output);
         }
     }
 
     // help
     else if (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help")) {
-        try std.io.getStdErr().writer().writeAll(
+        try stderr.writeAll(
             \\Usage: dwmbar [cmd] [param]
             \\
             \\   Run `dwmbar` to update all blocks.
@@ -64,11 +69,11 @@ pub fn main() anyerror!void {
                 break i;
             }
         } else {
-            try std.io.getStdErr().writer().print("Non-existent block: `{s}`\n", .{cmd.?});
+            try stderr.print("Non-existent block: `{s}`\n", .{cmd.?});
             std.process.exit(1);
         };
 
-        const contents = try block_file.readToEndAlloc(allocator, 2048);
+        const contents = try block_file.readToEndAlloc(allocator, std.math.maxInt(u16));
         var it = mem.split(contents, "\n");
 
         for (blocks) |b, i| {
@@ -85,7 +90,7 @@ pub fn main() anyerror!void {
     try block_file.seekTo(0);
 
     var bar = std.ArrayList(u8).init(allocator);
-    try bar.appendSlice(" ");
+    try bar.appendSlice(config.global_prefix);
 
     for (outputs.items) |o, i| {
         // output to dwmbar
@@ -102,8 +107,11 @@ pub fn main() anyerror!void {
     }
 
     bar.resize(bar.items.len - config.delim.len) catch unreachable;
-    try bar.appendSlice(" \x00");
+    try bar.appendSlice(config.global_suffix);
+    try bar.append(0);
     try block_file.setEndPos(try block_file.getPos());
+
+    log.debug("setting bar to: `{s}`", .{bar.items});
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }
@@ -114,11 +122,6 @@ fn runCmd(allocator: *mem.Allocator, cmd: []const u8) ![]const u8 {
         .argv = &[3][]const u8{ "sh", "-c", cmd },
     });
     allocator.free(exec.stderr);
-    for (exec.stdout) |*c| {
-        if (c.* == '\n') c.* = ' ';
-    }
+    mem.replaceScalar(u8, exec.stdout, '\n', ' ');
     return exec.stdout;
 }
-
-// build.zig
-pub var compile_timestamp = comptime std.fmt.parseInt(i64, @embedFile("timestamp"), 10) catch unreachable;
