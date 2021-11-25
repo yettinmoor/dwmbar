@@ -5,7 +5,9 @@ const log = std.log;
 extern fn display(*const u8) void;
 
 const config = @import("config.zig");
-const block_file_path = "/tmp/dwmbar";
+const Block = @import("Block.zig");
+
+const cache_path = "/tmp/dwmbar";
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,73 +15,63 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     const allocator = &arena.allocator;
 
-    const stderr = std.io.getStdErr().writer();
+    var args = std.process.ArgIteratorPosix.init();
+    _ = args.next();
+    const cmd = args.next();
+    const param = args.next();
+
+    // Print usage.
+    if (cmd != null and (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help"))) {
+        usage(std.io.getStdOut().writer(), 0);
+        // unreachable;
+    }
 
     const blocks = config.readConfigFile(allocator) catch {
         std.log.err("parsing error, exiting...", .{});
         std.process.exit(1);
     };
 
-    var args = std.process.ArgIteratorPosix.init();
-    _ = args.next();
-    const cmd = args.next();
-    const param = args.next();
-
     const cwd = std.fs.cwd();
-    const block_file = try cwd.createFile(
-        block_file_path,
+    const cache = try cwd.createFile(
+        cache_path,
         .{ .read = true, .truncate = false },
     );
-    defer block_file.close();
+    defer cache.close();
 
+    // Always run all commands if there is no cache.
     const run_all = blk: {
-        const stat = try block_file.stat();
+        const stat = try cache.stat();
         break :blk stat.size == 0;
     };
 
     var outputs = std.ArrayList([]const u8).init(allocator);
 
-    // `dwmbar` OR block_file newly created
+    // `dwmbar` OR cache newly created.
     if (cmd == null or run_all) {
         for (blocks) |b| {
-            const output = try runCmd(allocator, b.cmd);
-            log.debug("running block [{s}]", .{b.name});
-            log.debug("  output: `{s}`", .{output});
+            const output = try b.run(allocator);
             try outputs.append(output);
         }
     }
 
-    // help
-    else if (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help")) {
-        try stderr.writeAll(
-            \\Usage: dwmbar [cmd] [param]
-            \\
-            \\   Run `dwmbar` to update all blocks.
-            \\   Run `dwmbar <cmd>` to update the block named <cmd>.
-            \\   Run `dwmbar <cmd> <param>` to set the block named <cmd> to <param>.
-            \\
-        );
-        std.process.exit(0);
-    }
-
-    // `dwmbar <cmd>`
+    // `dwmbar <block>`
     else {
-        const block_index = for (blocks) |b, i| {
+        const index = for (blocks) |b, i| {
             if (std.mem.eql(u8, cmd.?, b.name)) {
                 break i;
             }
         } else {
-            try stderr.print("Non-existent block: `{s}`\n", .{cmd.?});
-            std.process.exit(1);
+            log.err("non-existent block: `{s}`", .{cmd.?});
+            usage(std.io.getStdErr().writer(), 1);
         };
 
-        const contents = try block_file.readToEndAlloc(allocator, std.math.maxInt(u16));
+        const contents = try cache.readToEndAlloc(allocator, std.math.maxInt(u16));
         var it = mem.split(contents, "\n");
 
         for (blocks) |b, i| {
             const line = it.next().?;
-            if (i == block_index) {
-                const output = param orelse try runCmd(allocator, b.cmd);
+            if (i == index) {
+                const output = param orelse try b.run(allocator);
                 try outputs.append(output);
             } else {
                 try outputs.append(line);
@@ -87,41 +79,45 @@ pub fn main() anyerror!void {
         }
     }
 
-    try block_file.seekTo(0);
+    try cache.seekTo(0);
 
     var bar = std.ArrayList(u8).init(allocator);
     try bar.appendSlice(config.global_prefix);
 
-    for (outputs.items) |o, i| {
-        // output to dwmbar
-        if (o.len != 0) {
+    // Append outputs to block file and dwmbar output.
+    for (outputs.items) |output, i| {
+        // Output to dwmbar.
+        if (output.len != 0) {
             if (blocks[i].prefix) |prefix| {
                 try bar.writer().print("{s} ", .{prefix});
             }
-            try bar.appendSlice(mem.trimRight(u8, o, " \t\r\n"));
+            try bar.appendSlice(output);
             try bar.appendSlice(config.delim);
         }
-
-        // output to /tmp/dwmbar
-        try block_file.writer().print("{s}\n", .{o});
+        // Output to cache.
+        try cache.writer().print("{s}\n", .{output});
     }
+
+    // Update cache file length.
+    const cache_len = try cache.getPos();
+    try cache.setEndPos(cache_len);
 
     bar.resize(bar.items.len - config.delim.len) catch unreachable;
     try bar.appendSlice(config.global_suffix);
     try bar.append(0);
-    try block_file.setEndPos(try block_file.getPos());
 
-    log.debug("setting bar to: `{s}`", .{bar.items});
+    log.info("setting bar to:", .{});
+    log.info("  `{s}`", .{bar.items});
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }
-
-fn runCmd(allocator: *mem.Allocator, cmd: []const u8) ![]const u8 {
-    const exec = try std.ChildProcess.exec(.{
-        .allocator = allocator,
-        .argv = &[3][]const u8{ "sh", "-c", cmd },
-    });
-    allocator.free(exec.stderr);
-    mem.replaceScalar(u8, exec.stdout, '\n', ' ');
-    return exec.stdout;
+fn usage(writer: anytype, status: u8) noreturn {
+    writer.writeAll(
+        \\Usage:
+        \\  dwmbar                 | Update all blocks.
+        \\  dwmbar [block]         | Update [block].
+        \\  dwmbar [block] [param] | Set [block] to "[param]".
+        \\
+    ) catch {};
+    std.process.exit(status);
 }

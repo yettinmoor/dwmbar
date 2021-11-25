@@ -3,11 +3,7 @@ const mem = std.mem;
 const log = std.log;
 const StringArrayHashMap = std.StringArrayHashMap;
 
-pub const Block = struct {
-    name: []const u8,
-    cmd: []const u8,
-    prefix: ?[]const u8 = null,
-};
+const Block = @import("Block.zig");
 
 pub var delim: []const u8 = " | ";
 
