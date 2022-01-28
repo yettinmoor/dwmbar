@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const log = std.log;
+const process = std.process;
 
 extern fn display(*const u8) void;
 
@@ -11,31 +12,32 @@ const cache_path = "/tmp/dwmbar";
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
-    const allocator = &arena.allocator;
+    const allocator = arena.allocator();
 
-    var args = std.process.ArgIteratorPosix.init();
+    var args = process.ArgIteratorPosix.init();
     _ = args.next();
     const cmd = args.next();
     const param = args.next();
 
     // Print usage.
     if (cmd != null and (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help"))) {
-        usage(std.io.getStdOut().writer(), 0);
+        printUsageAndExit(std.io.getStdOut().writer(), 0);
         // unreachable;
     }
 
     const blocks = config.readConfigFile(allocator) catch {
-        std.log.err("parsing error, exiting...", .{});
-        std.process.exit(1);
+        log.err("parsing error, exiting...", .{});
+        process.exit(1);
     };
 
     const cwd = std.fs.cwd();
-    const cache = try cwd.createFile(
-        cache_path,
-        .{ .read = true, .truncate = false },
-    );
+    const cache = try cwd.createFile(cache_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .Exclusive,
+    });
     defer cache.close();
 
     // Always run all commands if there is no cache.
@@ -62,11 +64,11 @@ pub fn main() anyerror!void {
             }
         } else {
             log.err("non-existent block: `{s}`", .{cmd.?});
-            usage(std.io.getStdErr().writer(), 1);
+            printUsageAndExit(std.io.getStdErr().writer(), 1);
         };
 
         const contents = try cache.readToEndAlloc(allocator, std.math.maxInt(u16));
-        var it = mem.split(contents, "\n");
+        var it = mem.split(u8, contents, "\n");
 
         for (blocks) |b, i| {
             const line = it.next().?;
@@ -84,9 +86,9 @@ pub fn main() anyerror!void {
     var bar = std.ArrayList(u8).init(allocator);
     try bar.appendSlice(config.global_prefix);
 
-    // Append outputs to block file and dwmbar output.
+    // Append outputs to cache file and dwmbar output.
     for (outputs.items) |output, i| {
-        // Output to dwmbar.
+        try cache.writer().print("{s}\n", .{output});
         if (output.len != 0) {
             if (blocks[i].prefix) |prefix| {
                 try bar.writer().print("{s} ", .{prefix});
@@ -94,14 +96,13 @@ pub fn main() anyerror!void {
             try bar.appendSlice(output);
             try bar.appendSlice(config.delim);
         }
-        // Output to cache.
-        try cache.writer().print("{s}\n", .{output});
     }
 
     // Update cache file length.
     const cache_len = try cache.getPos();
     try cache.setEndPos(cache_len);
 
+    // Remove last delim and zero-terminate bar output.
     bar.resize(bar.items.len - config.delim.len) catch unreachable;
     try bar.appendSlice(config.global_suffix);
     try bar.append(0);
@@ -111,7 +112,8 @@ pub fn main() anyerror!void {
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }
-fn usage(writer: anytype, status: u8) noreturn {
+
+fn printUsageAndExit(writer: anytype, status: u8) noreturn {
     writer.writeAll(
         \\Usage:
         \\  dwmbar                 | Update all blocks.
@@ -119,5 +121,5 @@ fn usage(writer: anytype, status: u8) noreturn {
         \\  dwmbar [block] [param] | Set [block] to "[param]".
         \\
     ) catch {};
-    std.process.exit(status);
+    process.exit(status);
 }

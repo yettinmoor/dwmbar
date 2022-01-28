@@ -17,7 +17,7 @@ pub fn build(b: *std.build.Builder) void {
 
     exe.addPackage(.{
         .name = "known-folders",
-        .path = "src/known-folders/known-folders.zig",
+        .path = std.build.FileSource.relative("src/known-folders/known-folders.zig"),
     });
 
     exe.addCSourceFile("src/display.c", &[_][]const u8{});

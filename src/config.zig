@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const log = std.log;
 const StringArrayHashMap = std.StringArrayHashMap;
+const string_literal = std.zig.string_literal;
 
 const Block = @import("Block.zig");
 
@@ -13,7 +14,8 @@ pub var global_suffix: []const u8 = " ";
 const known_folders = @import("known-folders/known-folders.zig");
 
 /// Caller owns returned slice.
-pub fn readConfigFile(allocator: *mem.Allocator) ![]Block {
+pub fn readConfigFile(allocator: mem.Allocator) ![]Block {
+    var timer = try std.time.Timer.start();
     const config = blk: {
         const dir =
             (try known_folders.open(allocator, .local_configuration, .{})) orelse
@@ -21,10 +23,14 @@ pub fn readConfigFile(allocator: *mem.Allocator) ![]Block {
         break :blk try dir.readFileAlloc(allocator, "dwmbar.cfg", std.math.maxInt(u32));
     };
     defer allocator.free(config);
-    return readConfig(allocator, config);
+    defer {
+        const time = timer.read() / 1000; // µs
+        log.debug("parsed config in {} microseconds", .{time});
+    }
+    return parseConfig(allocator, config);
 }
 
-fn readConfig(allocator: *mem.Allocator, config: []const u8) ![]Block {
+fn parseConfig(allocator: mem.Allocator, config: []const u8) ![]Block {
     var kv_blocks = try getKvBlocks(allocator, config);
     defer kv_blocks.deinit();
 
@@ -45,7 +51,7 @@ fn readConfig(allocator: *mem.Allocator, config: []const u8) ![]Block {
             }
         } else {
             const cmd = kvs.value_ptr.get("cmd") orelse {
-                log.err("[{s}]: missing `cmd` parameter.", .{name});
+                log.err("[{s}] has no `cmd` parameter", .{name});
                 return error.MissingParam;
             };
             const prefix = kvs.value_ptr.get("prefix");
@@ -63,40 +69,42 @@ fn readConfig(allocator: *mem.Allocator, config: []const u8) ![]Block {
 
 const KeyValuePairs = StringArrayHashMap([]const u8);
 
-fn getKvBlocks(allocator: *mem.Allocator, config: []const u8) !StringArrayHashMap(KeyValuePairs) {
-    var it = mem.split(config, "\n");
+fn getKvBlocks(allocator: mem.Allocator, config: []const u8) !StringArrayHashMap(KeyValuePairs) {
+    var it = mem.split(u8, config, "\n");
 
     var kv_blocks = StringArrayHashMap(KeyValuePairs).init(allocator);
     var current_block: []const u8 = "";
 
     var line_no: usize = 1;
     while (it.next()) |untrimmed_line| : (line_no += 1) {
-        const line = mem.trim(u8, untrimmed_line, " \t\r");
+        const line = trimWhitespace(untrimmed_line);
         if (line.len == 0) {
             continue;
         }
         switch (line[0]) {
             '#' => {},
             '[' => {
-                const end = mem.lastIndexOfScalar(u8, line, ']') orelse {
-                    log.err("line {}: invalid header fmt: `{s}`", .{ line_no, line });
+                if (line[line.len - 1] != ']') {
+                    log.err("line {}: invalid header: expected `[<blockname>]`", .{line_no});
                     return error.ParseError;
-                };
-                current_block = line[1..end];
+                }
+                current_block = trimWhitespace(line[1 .. line.len - 1]);
                 if (current_block.len == 0) {
                     log.err("line {}: empty name", .{line_no});
                     return error.ParseError;
                 }
-                if (kv_blocks.contains(current_block)) {
-                    log.err("line {}: duplicate block: `{s}`", .{ line_no, current_block });
-                    return error.ParseError;
+                if (!kv_blocks.contains(current_block)) {
+                    try kv_blocks.put(current_block, KeyValuePairs.init(allocator));
                 }
-                try kv_blocks.put(current_block, KeyValuePairs.init(allocator));
             },
             else => {
-                var line_it = mem.tokenize(line, "=");
-                const key = mem.trim(u8, line_it.next().?, " \t");
-                const value = mem.trim(u8, line_it.rest(), " \t");
+                var line_it = mem.tokenize(u8, line, " \t\r\n");
+                const key = line_it.next().?;
+                if (!mem.eql(u8, "=", line_it.next() orelse "")) {
+                    log.err("line {}: expected `<key> = <value>`", .{line_no});
+                    return error.ParseError;
+                }
+                const value = line_it.rest();
                 if (value.len == 0) {
                     log.err("line {}: expected value", .{line_no});
                     return error.ParseError;
@@ -105,7 +113,8 @@ fn getKvBlocks(allocator: *mem.Allocator, config: []const u8) !StringArrayHashMa
                     log.err("line {}: key-value pair outside block", .{line_no});
                     return error.ParseError;
                 };
-                try kv_block_entry.put(key, mem.trim(u8, value, "\""));
+                const string = try string_literal.parseAlloc(allocator, value);
+                try kv_block_entry.put(key, string);
             },
         }
     }
@@ -113,11 +122,16 @@ fn getKvBlocks(allocator: *mem.Allocator, config: []const u8) !StringArrayHashMa
     return kv_blocks;
 }
 
+fn trimWhitespace(s: []const u8) []const u8 {
+    return mem.trim(u8, s, " \t\r\n");
+}
+
 const testing = std.testing;
 
 test {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    _ = try readConfig(&arena.allocator,
+
+    _ = try parseConfig(&arena.allocator,
         \\[!global]
         \\delim = " | "
         \\
@@ -134,19 +148,19 @@ test {
         \\
     );
 
-    try testing.expectError(error.MissingParam, readConfig(&arena.allocator,
+    try testing.expectError(error.MissingParam, parseConfig(&arena.allocator,
         \\[hello]
         \\prefix = "!"
         \\
     ));
 
-    try testing.expectError(error.ParseError, readConfig(&arena.allocator,
+    try testing.expectError(error.ParseError, parseConfig(&arena.allocator,
         \\[hello
         \\cmd = "printf hello!"
         \\
     ));
 
-    try testing.expectError(error.ParseError, readConfig(&arena.allocator,
+    try testing.expectError(error.ParseError, parseConfig(&arena.allocator,
         \\[hello]
         \\cmd =
         \\
