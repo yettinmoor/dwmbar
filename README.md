@@ -20,6 +20,8 @@ prefix = ""
 cmd = "date +%R"
 ```
 
-`cmd` and `prefix` are valid keys.
+For modules, valid keys are: `cmd`, `prefix`.
+
+For `!global`, valid keys are: `delim`, `global_prefix`, `global_suffix`.
 
 `dwmbar` stores state in `/tmp/dwmbar`. It does not run as a daemon, only when updating a block.
