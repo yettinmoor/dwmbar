@@ -84,7 +84,7 @@ pub fn main() anyerror!void {
     try cache.seekTo(0);
 
     var bar = std.ArrayList(u8).init(allocator);
-    try bar.appendSlice(config.global_prefix);
+    try bar.appendSlice(config.getGlobalPrefix());
 
     // Append outputs to cache file and dwmbar output.
     for (outputs.items) |output, i| {
@@ -94,7 +94,7 @@ pub fn main() anyerror!void {
                 try bar.writer().print("{s} ", .{prefix});
             }
             try bar.appendSlice(output);
-            try bar.appendSlice(config.delim);
+            try bar.appendSlice(config.getDelim());
         }
     }
 
@@ -103,8 +103,8 @@ pub fn main() anyerror!void {
     try cache.setEndPos(cache_len);
 
     // Remove last delim and zero-terminate bar output.
-    bar.resize(bar.items.len - config.delim.len) catch unreachable;
-    try bar.appendSlice(config.global_suffix);
+    bar.resize(bar.items.len - config.getDelim().len) catch unreachable;
+    try bar.appendSlice(config.getGlobalSuffix());
     try bar.append(0);
 
     log.info("setting bar to:", .{});

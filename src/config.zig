@@ -6,10 +6,21 @@ const string_literal = std.zig.string_literal;
 
 const Block = @import("Block.zig");
 
-pub var delim: []const u8 = " | ";
+var delim: []const u8 = " | ";
+var global_prefix: []const u8 = " ";
+var global_suffix: []const u8 = " ";
 
-pub var global_prefix: []const u8 = " ";
-pub var global_suffix: []const u8 = " ";
+pub fn getDelim() []const u8 {
+    return delim;
+}
+
+pub fn getGlobalPrefix() []const u8 {
+    return global_prefix;
+}
+
+pub fn getGlobalSuffix() []const u8 {
+    return global_suffix;
+}
 
 const known_folders = @import("known-folders/known-folders.zig");
 
