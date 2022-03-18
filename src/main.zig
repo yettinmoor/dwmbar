@@ -24,7 +24,6 @@ pub fn main() anyerror!void {
     // Print usage.
     if (cmd != null and (mem.eql(u8, cmd.?, "-h") or mem.eql(u8, cmd.?, "--help"))) {
         printUsageAndExit(std.io.getStdOut().writer(), 0);
-        // unreachable;
     }
 
     const blocks = config.readConfigFile(allocator) catch {
@@ -107,8 +106,7 @@ pub fn main() anyerror!void {
     try bar.appendSlice(config.getGlobalSuffix());
     try bar.append(0);
 
-    log.info("setting bar to:", .{});
-    log.info("  `{s}`", .{bar.items});
+    log.info("setting bar to: `{s}`", .{bar.items});
 
     display(@ptrCast(*const u8, bar.items.ptr));
 }

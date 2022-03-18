@@ -4,6 +4,8 @@ const log = std.log;
 const StringArrayHashMap = std.StringArrayHashMap;
 const string_literal = std.zig.string_literal;
 
+const config_file_name = "dwmbar.cfg";
+
 const Block = @import("Block.zig");
 
 var delim: []const u8 = " | ";
@@ -26,18 +28,15 @@ const known_folders = @import("known-folders/known-folders.zig");
 
 /// Caller owns returned slice.
 pub fn readConfigFile(allocator: mem.Allocator) ![]Block {
-    var timer = try std.time.Timer.start();
     const config = blk: {
-        const dir =
-            (try known_folders.open(allocator, .local_configuration, .{})) orelse
+        const dir = try known_folders.open(allocator, .local_configuration, .{});
+        if (dir == null) {
             return error.FileNotFound;
-        break :blk try dir.readFileAlloc(allocator, "dwmbar.cfg", std.math.maxInt(u32));
+        }
+        log.debug("reading config file...", .{});
+        break :blk try dir.?.readFileAlloc(allocator, config_file_name, std.math.maxInt(u32));
     };
     defer allocator.free(config);
-    defer {
-        const time = timer.read() / 1000; // µs
-        log.debug("parsed config in {} microseconds", .{time});
-    }
     return parseConfig(allocator, config);
 }
 
@@ -74,6 +73,8 @@ fn parseConfig(allocator: mem.Allocator, config: []const u8) ![]Block {
         }
         kvs.value_ptr.deinit();
     }
+
+    log.debug("parsed {} blocks", .{blocks.items.len});
 
     return blocks.toOwnedSlice();
 }
