@@ -1,3 +1,5 @@
+// TODO: Use a better config parser from astrolabe.
+
 const std = @import("std");
 const mem = std.mem;
 const log = std.log;

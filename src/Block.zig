@@ -17,6 +17,9 @@ pub fn run(block: Block, allocator: mem.Allocator) ![]const u8 {
         .allocator = allocator,
         .argv = &.{ "sh", "-c", block.cmd },
     });
+    if (exec.stderr.len != 0) {
+        log.warn("[{s}] stderr:\n{s}", .{ block.name, mem.trimRight(u8, exec.stderr, "\r\n") });
+    }
     allocator.free(exec.stderr);
 
     const output = try mem.replaceOwned(u8, allocator, exec.stdout, "%DELIM", config.getDelim());
